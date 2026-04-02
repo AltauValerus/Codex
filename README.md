@@ -39,3 +39,22 @@ python src/data/render_charts.py \
 - For Colab, place data on Drive or object storage and run the same scripts.
 
 See `BTC_NEXT_CANDLE_ML_PLAN.md` for the full methodology.
+
+
+## Next step (train a baseline now)
+
+After generating data, train a calibrated direction baseline:
+
+```bash
+python src/train/train_baseline.py \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out-dir artifacts/baseline
+```
+
+This produces:
+- `artifacts/baseline/baseline_direction_model.joblib`
+- `artifacts/baseline/metrics.json`
+
+Use these metrics as the minimum benchmark before training CNN/hybrid models.
