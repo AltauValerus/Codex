@@ -58,3 +58,24 @@ This produces:
 - `artifacts/baseline/metrics.json`
 
 Use these metrics as the minimum benchmark before training CNN/hybrid models.
+
+
+## Validate data before training
+
+```bash
+python src/data/validate_dataset.py \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --windows data/interim/windows/window_index.parquet \
+  --timeframe-minutes 5
+```
+
+This checks duplicates/missing gaps, split ordering, label alignment, and class balance.
+
+## What I need from you
+
+Please confirm these 5 items so we can run full training exactly as you want:
+1. Exchange + pair (default: Binance BTC/USDT).
+2. Exact historical range (default in repo: 2021-01-01 to 2026-03-31 UTC).
+3. Whether we optimize for **direction accuracy** or **trading PnL after fees**.
+4. Fee + slippage assumptions for backtests.
+5. Compute target (Colab Free / Pro / local GPU).
