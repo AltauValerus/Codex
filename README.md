@@ -221,3 +221,24 @@ python src/eval/compare_models.py \
 ```
 
 This produces a single comparison table and reports missing model files without crashing.
+
+
+## One-command ablation pipeline (judgment-call helper)
+
+If you want one command to train key models and auto-compare them:
+
+```bash
+python src/eval/run_ablation_pipeline.py \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --images-dir data/processed/images_224 \
+  --windows data/interim/windows/window_index.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out-root artifacts/ablation
+```
+
+It trains logistic, GBDT, and GRU.
+If images/windows exist, it also runs CNN.
+Then it creates:
+- `artifacts/ablation/model_comparison.json`
+- `artifacts/ablation/model_comparison.csv`
