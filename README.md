@@ -206,3 +206,18 @@ python src/train/train_sequence_model.py \
 Outputs:
 - `artifacts/sequence_gru/gru_sequence_model.pt`
 - `artifacts/sequence_gru/metrics.json`
+
+
+## Compare models in one report (ablation helper)
+
+```bash
+python src/eval/compare_models.py \
+  --model logistic=artifacts/baseline/metrics.json \
+  --model gbdt=artifacts/gbdt_baseline/metrics.json \
+  --model gru=artifacts/sequence_gru/metrics.json \
+  --model cnn=artifacts/image_cnn/metrics.json \
+  --out artifacts/eval/model_comparison.json \
+  --out-csv artifacts/eval/model_comparison.csv
+```
+
+This produces a single comparison table and reports missing model files without crashing.
