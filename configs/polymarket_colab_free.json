@@ -1,0 +1,19 @@
+{
+  "market_context": "Polymarket BTC up/down 5m style",
+  "exchange": "coinbase",
+  "symbol": "BTC/USD",
+  "timeframe": "5m",
+  "start": "2021-01-01T00:00:00Z",
+  "end": "2026-03-31T23:55:00Z",
+  "window_size": 96,
+  "image_width": 224,
+  "image_height": 224,
+  "objective": "direction_accuracy_with_cost_aware_filter",
+  "decision_cost": 0.02,
+  "min_confidence_edge": 0.03,
+  "splits": {
+    "train_end": "2024-06-30T23:55:00Z",
+    "val_end": "2025-03-31T23:55:00Z"
+  },
+  "compute_target": "colab_free"
+}
