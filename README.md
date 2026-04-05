@@ -273,3 +273,21 @@ python src/eval/backtest_from_model.py \
 ```
 
 This outputs coverage, hit rate, average PnL/trade, total PnL, and max drawdown.
+
+
+## Freeze dataset manifest (`dataset_v1`)
+
+```bash
+python src/data/freeze_dataset_manifest.py \
+  --name dataset_v1 \
+  --source "coinbase BTC/USD" \
+  --timeframe 5m \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --windows data/interim/windows/window_index.parquet \
+  --images-dir data/processed/images_224 \
+  --out artifacts/manifests/dataset_v1_manifest.json
+```
+
+This records file hashes, row counts, split boundaries, and image counts for reproducibility.
