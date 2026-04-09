@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path as _Path
+
 sys.path.append(str(_Path(__file__).resolve().parents[2]))
 
 import argparse
@@ -13,10 +14,20 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from src.features.common import build_feature_frame
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import balanced_accuracy_score, brier_score_loss, f1_score, roc_auc_score
+
+from src.eval.policy_utils import (
+    build_prediction_frame,
+    compute_classification_metrics,
+    decision_report,
+    sweep_min_edge,
+)
+from src.features.common import (
+    PREDICTION_CONTEXT_COLUMNS,
+    build_direction_dataset,
+    build_prediction_context,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,47 +37,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-end", required=True)
     p.add_argument("--decision-cost", type=float, default=0.02)
     p.add_argument("--min-edge", type=float, default=0.03)
+    p.add_argument("--slippage", type=float, default=0.0)
+    p.add_argument("--feature-set", choices=["baseline", "v2_numeric"], default="baseline")
+    p.add_argument("--calibration", choices=["sigmoid", "isotonic"], default="isotonic")
+    p.add_argument("--learning-rate", type=float, default=0.05)
+    p.add_argument("--max-depth", type=int, default=6)
+    p.add_argument("--max-iter", type=int, default=400)
+    p.add_argument("--min-samples-leaf", type=int, default=20)
+    p.add_argument("--sweep-min-edge", action="store_true")
+    p.add_argument("--sweep-start", type=float, default=0.0)
+    p.add_argument("--sweep-end", type=float, default=0.08)
+    p.add_argument("--sweep-step", type=float, default=0.01)
+    p.add_argument("--min-coverage", type=float, default=0.05)
     p.add_argument("--out-dir", required=True)
     return p.parse_args()
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    return build_feature_frame(df)
-
-
-def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
-    y_pred = (y_prob >= 0.5).astype(int)
-    return {
-        "auc": float(roc_auc_score(y_true, y_prob)),
-        "f1": float(f1_score(y_true, y_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-        "brier": float(brier_score_loss(y_true, y_prob)),
-    }
-
-
-def decision_report(y_true: np.ndarray, y_prob: np.ndarray, decision_cost: float, min_edge: float) -> dict[str, float]:
-    edge = np.abs(y_prob - 0.5)
-    take = edge >= min_edge
-    if not np.any(take):
-        return {
-            "coverage": 0.0,
-            "n_trades": 0,
-            "hit_rate": 0.0,
-            "avg_edge": 0.0,
-            "proxy_ev_per_trade": -decision_cost,
-        }
-
-    y_sel = y_true[take]
-    pred_sel = (y_prob[take] >= 0.5).astype(int)
-    hit = (y_sel == pred_sel).astype(float)
-    ev = np.mean(np.where(hit > 0, 1.0, -1.0) - decision_cost)
-    return {
-        "coverage": float(np.mean(take)),
-        "n_trades": int(np.sum(take)),
-        "hit_rate": float(np.mean(hit)),
-        "avg_edge": float(np.mean(edge[take])),
-        "proxy_ev_per_trade": float(ev),
-    }
 
 
 def main() -> None:
@@ -78,13 +62,16 @@ def main() -> None:
     df["timestamp_open"] = pd.to_datetime(df["timestamp_open"], utc=True)
     df = df.sort_values("timestamp_open").reset_index(drop=True)
 
-    X = build_features(df)
-    y = (df["close"].shift(-1) > df["close"]).astype(int)
-
-    dataset = X.copy()
-    dataset["y"] = y
-    dataset["timestamp_open"] = df["timestamp_open"]
-    dataset = dataset.dropna().reset_index(drop=True)
+    dataset = build_direction_dataset(
+        df,
+        history_bars=24,
+        horizon=1,
+        timeframe_minutes=5,
+        feature_set=args.feature_set,
+    )
+    context = build_prediction_context(df, horizon=1)
+    dataset = dataset.merge(context, on="timestamp_open", how="left")
+    dataset = dataset.dropna(subset=PREDICTION_CONTEXT_COLUMNS).reset_index(drop=True)
 
     train_end = pd.Timestamp(args.train_end, tz="UTC")
     val_end = pd.Timestamp(args.val_end, tz="UTC")
@@ -93,7 +80,9 @@ def main() -> None:
     val_mask = (dataset["timestamp_open"] > train_end) & (dataset["timestamp_open"] <= val_end)
     test_mask = dataset["timestamp_open"] > val_end
 
-    feature_cols = [c for c in dataset.columns if c not in {"y", "timestamp_open"}]
+    feature_cols = [
+        c for c in dataset.columns if c not in {"y", "timestamp_open", *PREDICTION_CONTEXT_COLUMNS}
+    ]
     X_train = dataset.loc[train_mask, feature_cols]
     y_train = dataset.loc[train_mask, "y"].to_numpy()
     X_val = dataset.loc[val_mask, feature_cols]
@@ -102,29 +91,112 @@ def main() -> None:
     y_test = dataset.loc[test_mask, "y"].to_numpy()
 
     base = HistGradientBoostingClassifier(
-        learning_rate=0.05,
-        max_depth=6,
-        max_iter=400,
-        min_samples_leaf=20,
+        learning_rate=args.learning_rate,
+        max_depth=args.max_depth,
+        max_iter=args.max_iter,
+        min_samples_leaf=args.min_samples_leaf,
         random_state=42,
     )
-    model = CalibratedClassifierCV(base, method="isotonic", cv=3)
+    model = CalibratedClassifierCV(base, method=args.calibration, cv=3)
     model.fit(X_train, y_train)
 
+    train_prob = model.predict_proba(X_train)[:, 1]
     val_prob = model.predict_proba(X_val)[:, 1]
     test_prob = model.predict_proba(X_test)[:, 1]
 
+    train_metrics = compute_classification_metrics(y_train, train_prob)
+    val_metrics = compute_classification_metrics(y_val, val_prob)
+    test_metrics = compute_classification_metrics(y_test, test_prob)
+
+    prediction_frames = {
+        "train": build_prediction_frame(
+            dataset.loc[train_mask].reset_index(drop=True),
+            train_prob,
+            split="train",
+            model_name="gbdt",
+            feature_set=args.feature_set,
+            calibration=args.calibration,
+        ),
+        "val": build_prediction_frame(
+            dataset.loc[val_mask].reset_index(drop=True),
+            val_prob,
+            split="val",
+            model_name="gbdt",
+            feature_set=args.feature_set,
+            calibration=args.calibration,
+        ),
+        "test": build_prediction_frame(
+            dataset.loc[test_mask].reset_index(drop=True),
+            test_prob,
+            split="test",
+            model_name="gbdt",
+            feature_set=args.feature_set,
+            calibration=args.calibration,
+        ),
+    }
+
+    prediction_files: dict[str, str] = {}
+    for split_name, pred_df in prediction_frames.items():
+        pred_path = out_dir / f"predictions_{split_name}.parquet"
+        pred_df.to_parquet(pred_path, index=False)
+        prediction_files[split_name] = str(pred_path)
+
+    threshold_sweep = None
+    selected_min_edge = float(args.min_edge)
+    if args.sweep_min_edge:
+        thresholds = np.arange(args.sweep_start, args.sweep_end + (args.sweep_step / 2.0), args.sweep_step)
+        threshold_sweep = sweep_min_edge(
+            prediction_frames["val"],
+            thresholds=thresholds,
+            decision_cost=args.decision_cost,
+            slippage=args.slippage,
+            min_coverage=args.min_coverage,
+            auc_tiebreaker=val_metrics["auc"],
+        )
+        selected_min_edge = float(threshold_sweep["selected_min_edge"])
+
     metrics = {
+        "model_name": "gbdt",
         "model": "hist_gradient_boosting",
+        "feature_set": args.feature_set,
+        "calibration": args.calibration,
+        "params": {
+            "learning_rate": args.learning_rate,
+            "max_depth": args.max_depth,
+            "max_iter": args.max_iter,
+            "min_samples_leaf": args.min_samples_leaf,
+        },
         "decision_cost": args.decision_cost,
-        "min_edge": args.min_edge,
+        "slippage": args.slippage,
+        "configured_min_edge": args.min_edge,
+        "selected_min_edge": selected_min_edge,
+        "threshold_selection": threshold_sweep,
+        "train": {
+            **train_metrics,
+            "decision": decision_report(
+                prediction_frames["train"],
+                min_edge=selected_min_edge,
+                decision_cost=args.decision_cost,
+                slippage=args.slippage,
+            ),
+        },
         "val": {
-            **compute_metrics(y_val, val_prob),
-            "decision": decision_report(y_val, val_prob, args.decision_cost, args.min_edge),
+            **val_metrics,
+            "decision": decision_report(
+                prediction_frames["val"],
+                min_edge=selected_min_edge,
+                decision_cost=args.decision_cost,
+                slippage=args.slippage,
+            ),
         },
         "test": {
-            **compute_metrics(y_test, test_prob),
-            "decision": decision_report(y_test, test_prob, args.decision_cost, args.min_edge),
+            **test_metrics,
+            "decision": decision_report(
+                prediction_frames["test"],
+                min_edge=selected_min_edge,
+                decision_cost=args.decision_cost,
+                slippage=args.slippage,
+            ),
         },
         "counts": {
             "train": int(train_mask.sum()),
@@ -132,6 +204,7 @@ def main() -> None:
             "test": int(test_mask.sum()),
         },
         "features": feature_cols,
+        "prediction_files": prediction_files,
     }
 
     joblib.dump(model, out_dir / "gbdt_direction_model.joblib")

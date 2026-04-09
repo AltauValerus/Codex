@@ -5,6 +5,8 @@ This repository now includes a concrete starter pipeline for the **next step** a
 2. build leakage-safe window labels,
 3. render deterministic candlestick images for train/val/test.
 
+If you are resuming from a later Codex session, start with `docs/CODEX_DESKTOP_HANDOFF.md`.
+
 ## Quickstart
 
 ```bash

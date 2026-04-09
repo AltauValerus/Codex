@@ -1,12 +1,10 @@
-"""Backtest decision policy from a trained baseline-style classifier.
-
-Loads a saved sklearn model and evaluates UP/DOWN/SKIP actions on a test period.
-"""
+"""Backtest decision policy from a trained baseline-style classifier."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path as _Path
+
 sys.path.append(str(_Path(__file__).resolve().parents[2]))
 
 import argparse
@@ -14,9 +12,14 @@ import json
 from pathlib import Path
 
 import joblib
-import numpy as np
 import pandas as pd
-from src.features.common import build_feature_frame
+
+from src.eval.policy_utils import build_prediction_frame, compute_classification_metrics, decision_report
+from src.features.common import (
+    PREDICTION_CONTEXT_COLUMNS,
+    build_direction_dataset,
+    build_prediction_context,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,21 +27,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", required=True, help="Path to .joblib model")
     p.add_argument("--ohlcv", required=True)
     p.add_argument("--val-end", required=True, help="Test starts strictly after this UTC timestamp")
+    p.add_argument("--feature-set", choices=["baseline", "v2_numeric"], default="baseline")
     p.add_argument("--min-edge", type=float, default=0.03)
     p.add_argument("--decision-cost", type=float, default=0.02)
     p.add_argument("--slippage", type=float, default=0.0)
     p.add_argument("--out", required=True, help="Output backtest json")
     return p.parse_args()
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    return build_feature_frame(df)
-
-
-def max_drawdown_pct(equity_curve: np.ndarray) -> float:
-    peak = np.maximum.accumulate(equity_curve)
-    dd = (equity_curve - peak) / np.maximum(peak, 1e-12)
-    return float(np.min(dd))
 
 
 def main() -> None:
@@ -49,56 +43,51 @@ def main() -> None:
     df["timestamp_open"] = pd.to_datetime(df["timestamp_open"], utc=True)
     df = df.sort_values("timestamp_open").reset_index(drop=True)
 
-    X = build_features(df)
-    y = (df["close"].shift(-1) > df["close"]).astype(int)
-
-    data = X.copy()
-    data["y"] = y
-    data["timestamp_open"] = df["timestamp_open"]
-    data = data.dropna().reset_index(drop=True)
+    data = build_direction_dataset(
+        df,
+        history_bars=24,
+        horizon=1,
+        timeframe_minutes=5,
+        feature_set=args.feature_set,
+    )
+    context = build_prediction_context(df, horizon=1)
+    data = data.merge(context, on="timestamp_open", how="left")
+    data = data.dropna(subset=PREDICTION_CONTEXT_COLUMNS).reset_index(drop=True)
 
     val_end = pd.Timestamp(args.val_end, tz="UTC")
     test = data[data["timestamp_open"] > val_end].copy()
 
-    feature_cols = [c for c in test.columns if c not in {"y", "timestamp_open"}]
+    feature_cols = [c for c in test.columns if c not in {"y", "timestamp_open", *PREDICTION_CONTEXT_COLUMNS}]
     prob = model.predict_proba(test[feature_cols])[:, 1]
-
-    edge = np.abs(prob - 0.5)
-    action = np.where(edge >= args.min_edge, np.where(prob >= 0.5, 1, -1), 0)
-    y_signed = np.where(test["y"].to_numpy() == 1, 1, -1)
-
-    trade_mask = action != 0
-    trade_pnl = np.zeros(len(action), dtype=float)
-    trade_pnl[trade_mask] = np.where(action[trade_mask] == y_signed[trade_mask], 1.0, -1.0) - args.decision_cost - args.slippage
-
-    equity = np.cumsum(trade_pnl)
-    equity_curve = 100.0 + equity
-
-    n_trades = int(np.sum(trade_mask))
-    wins = int(np.sum((trade_pnl > 0) & trade_mask))
-    losses = int(np.sum((trade_pnl < 0) & trade_mask))
-    hit_rate = float(wins / n_trades) if n_trades else 0.0
+    prediction_df = build_prediction_frame(
+        test.reset_index(drop=True),
+        prob,
+        split="test",
+        model_name="loaded_model",
+        feature_set=args.feature_set,
+        calibration=None,
+    )
 
     out_report = {
         "inputs": {
             "model": args.model,
             "ohlcv": args.ohlcv,
             "val_end": args.val_end,
+            "feature_set": args.feature_set,
             "min_edge": args.min_edge,
             "decision_cost": args.decision_cost,
             "slippage": args.slippage,
         },
-        "summary": {
-            "n_rows_test": int(len(test)),
-            "n_trades": n_trades,
-            "coverage": float(n_trades / max(len(test), 1)),
-            "wins": wins,
-            "losses": losses,
-            "hit_rate": hit_rate,
-            "avg_pnl_per_trade": float(np.mean(trade_pnl[trade_mask])) if n_trades else 0.0,
-            "total_pnl": float(np.sum(trade_pnl)),
-            "max_drawdown_pct": max_drawdown_pct(equity_curve) if len(equity_curve) else 0.0,
-        },
+        "classification": compute_classification_metrics(
+            prediction_df["y_true"].to_numpy(),
+            prediction_df["y_prob"].to_numpy(),
+        ),
+        "summary": decision_report(
+            prediction_df,
+            min_edge=args.min_edge,
+            decision_cost=args.decision_cost,
+            slippage=args.slippage,
+        ),
     }
 
     out = Path(args.out)

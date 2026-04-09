@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path as _Path
+
 sys.path.append(str(_Path(__file__).resolve().parents[2]))
 
 import argparse
@@ -12,11 +13,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from src.features.common import build_feature_frame
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+from src.eval.policy_utils import compute_classification_metrics
+from src.features.common import build_direction_dataset
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,21 +28,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train-bars", type=int, default=400)
     p.add_argument("--test-bars", type=int, default=100)
     p.add_argument("--step-bars", type=int, default=100)
+    p.add_argument("--feature-set", choices=["baseline", "v2_numeric"], default="baseline")
     p.add_argument("--out", required=True)
     return p.parse_args()
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    return build_feature_frame(df)
-
-
-def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
-    y_pred = (y_prob >= 0.5).astype(int)
-    return {
-        "auc": float(roc_auc_score(y_true, y_prob)),
-        "f1": float(f1_score(y_true, y_pred)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-    }
 
 
 def main() -> None:
@@ -50,13 +40,15 @@ def main() -> None:
     df["timestamp_open"] = pd.to_datetime(df["timestamp_open"], utc=True)
     df = df.sort_values("timestamp_open").reset_index(drop=True)
 
-    X = build_features(df)
-    y = (df["close"].shift(-1) > df["close"]).astype(int)
-
-    data = X.copy()
-    data[args.label_col] = y
-    data["timestamp_open"] = df["timestamp_open"]
-    data = data.dropna().reset_index(drop=True)
+    data = build_direction_dataset(
+        df,
+        history_bars=24,
+        horizon=1,
+        timeframe_minutes=5,
+        feature_set=args.feature_set,
+    )
+    if args.label_col != "y":
+        data = data.rename(columns={"y": args.label_col})
 
     feature_cols = [c for c in data.columns if c not in {args.label_col, "timestamp_open"}]
 
@@ -83,14 +75,14 @@ def main() -> None:
 
         model.fit(tr[feature_cols], tr[args.label_col])
         prob = model.predict_proba(te[feature_cols])[:, 1]
-        m = compute_metrics(te[args.label_col].to_numpy(), prob)
+        metrics = compute_classification_metrics(te[args.label_col].to_numpy(), prob, include_brier=False)
         fold_reports.append(
             {
                 "train_start": str(tr["timestamp_open"].iloc[0]),
                 "train_end": str(tr["timestamp_open"].iloc[-1]),
                 "test_start": str(te["timestamp_open"].iloc[0]),
                 "test_end": str(te["timestamp_open"].iloc[-1]),
-                **m,
+                **metrics,
             }
         )
 
@@ -98,12 +90,19 @@ def main() -> None:
 
     agg = {
         "n_folds": len(fold_reports),
-        "mean_auc": float(np.mean([f["auc"] for f in fold_reports])) if fold_reports else None,
-        "mean_f1": float(np.mean([f["f1"] for f in fold_reports])) if fold_reports else None,
-        "mean_balanced_accuracy": float(np.mean([f["balanced_accuracy"] for f in fold_reports])) if fold_reports else None,
+        "mean_auc": float(np.nanmean([f["auc"] for f in fold_reports])) if fold_reports else None,
+        "mean_f1": float(np.nanmean([f["f1"] for f in fold_reports])) if fold_reports else None,
+        "mean_balanced_accuracy": float(np.nanmean([f["balanced_accuracy"] for f in fold_reports]))
+        if fold_reports
+        else None,
     }
 
-    report = {"aggregate": agg, "folds": fold_reports}
+    report = {
+        "feature_set": args.feature_set,
+        "label_col": args.label_col,
+        "aggregate": agg,
+        "folds": fold_reports,
+    }
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
