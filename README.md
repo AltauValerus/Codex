@@ -1,0 +1,360 @@
+# BTC Next-Candle Dataset Starter
+
+## Start here
+
+If you want the fastest path to operating this project, start with:
+- `docs/OPERATOR_RUNBOOK.md` (canonical day-to-day guide)
+- single-model mode for routine runs
+- ablation mode only for periodic model re-selection
+
+This repository now includes a concrete starter pipeline for the **next step** after planning:
+1. fetch historical BTC 5m OHLCV,
+2. build leakage-safe window labels,
+3. render deterministic candlestick images for train/val/test.
+
+## Quickstart
+
+```bash
+pip install -r requirements.txt
+
+python src/data/fetch_ohlcv.py \
+  --exchange binance \
+  --symbol BTC/USDT \
+  --timeframe 5m \
+  --start 2021-01-01T00:00:00Z \
+  --end 2026-03-31T23:55:00Z \
+  --out data/raw/ohlcv/binance_btcusdt_5m.parquet
+
+# Alternative data source (RapidAPI Alpha Vantage)
+export RAPIDAPI_KEY=YOUR_KEY
+python -m src.data.fetch_ohlcv \
+  --provider alphavantage_rapidapi \
+  --symbol BTC/USD \
+  --market USD \
+  --timeframe 5min \
+  --start 2025-01-01T00:00:00Z \
+  --end 2025-03-31T23:55:00Z \
+  --out data/raw/ohlcv/alphavantage_btcusd_5min.parquet
+
+python src/data/build_windows.py \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --window-size 96 \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out data/interim/windows/window_index.parquet
+
+python src/data/render_charts.py \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --windows data/interim/windows/window_index.parquet \
+  --out-dir data/processed/images_224 \
+  --width 224 \
+  --height 224
+```
+
+## Notes
+- All splits are time-based, not random.
+- Labels target the **next candle** (`t+1`) from a window ending at `t`.
+- For Colab, place data on Drive or object storage and run the same scripts.
+
+See `BTC_NEXT_CANDLE_ML_PLAN.md` for the full methodology.
+
+
+## Next step (train a baseline now)
+
+After generating data, train a calibrated direction baseline:
+
+```bash
+python -m src.train.train_baseline \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out-dir artifacts/baseline
+```
+
+This produces:
+- `artifacts/baseline/baseline_direction_model.joblib`
+- `artifacts/baseline/metrics.json`
+
+Use these metrics as the minimum benchmark before training CNN/hybrid models.
+
+
+## Validate data before training
+
+```bash
+python src/data/validate_dataset.py \
+  --ohlcv data/raw/ohlcv/binance_btcusdt_5m.parquet \
+  --windows data/interim/windows/window_index.parquet \
+  --timeframe-minutes 5
+```
+
+This checks duplicates/missing gaps, split ordering, label alignment, and class balance.
+
+## What I need from you
+
+Please confirm these 5 items so we can run full training exactly as you want:
+1. Exchange + pair (default: Binance BTC/USDT).
+2. Exact historical range (default in repo: 2021-01-01 to 2026-03-31 UTC).
+3. Whether we optimize for **direction accuracy** or **trading PnL after fees**.
+4. Fee + slippage assumptions for backtests.
+5. Compute target (Colab Free / Pro / local GPU).
+
+
+## Defaults chosen for your use case
+
+Based on your answers, I picked these defaults:
+- Exchange/pair: **Coinbase BTC/USD** (closest to USD reference style).
+- Compute: **Colab Free**.
+- Objective: **direction with cost-aware decision filter** (matches up/down market usage).
+- Decision cost fallback: **0.02** (2%) until you provide a better estimate.
+- Confidence edge threshold: **0.03** to avoid low-conviction bets.
+
+Example baseline run:
+
+```bash
+python -m src.train.train_baseline \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --decision-cost 0.02 \
+  --min-edge 0.03 \
+  --out-dir artifacts/baseline
+```
+
+Config preset: `configs/polymarket_colab_free.json`.
+
+
+## Next step after baseline: train an image CNN
+
+```bash
+python -m src.train.train_image_cnn \
+  --images-dir data/processed/images_224 \
+  --windows data/interim/windows/window_index.parquet \
+  --epochs 8 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --out-dir artifacts/image_cnn
+```
+
+Outputs:
+- `artifacts/image_cnn/image_cnn.pt`
+- `artifacts/image_cnn/metrics.json`
+
+Use this only after the baseline is running; compare out-of-sample metrics against the baseline before trusting it.
+
+
+## Offline smoke-test mode (no exchange network)
+
+If exchange APIs are unreachable, generate synthetic OHLCV and run the full pipeline offline:
+
+```bash
+python src/data/generate_synthetic_ohlcv.py \
+  --start 2026-01-01T00:00:00Z \
+  --periods 2500 \
+  --timeframe-minutes 5 \
+  --out data/raw/ohlcv/synthetic_btcusd_5m.parquet
+```
+
+Then use `synthetic_btcusd_5m.parquet` in the same build/train commands.
+
+
+## Phase-1 tools added (labeling + walk-forward eval)
+
+Build advanced labels:
+
+```bash
+python src/data/build_labels.py \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --method fixed_horizon_ternary \
+  --horizon 1 \
+  --flat-threshold 0.0005 \
+  --out data/interim/labels/fixed_horizon_ternary.parquet
+
+python src/data/build_labels.py \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --method triple_barrier \
+  --horizon 12 \
+  --pt 0.0025 \
+  --sl 0.0025 \
+  --out data/interim/labels/triple_barrier.parquet
+```
+
+Walk-forward evaluation:
+
+```bash
+python -m src.eval.walk_forward \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --train-bars 400 \
+  --test-bars 100 \
+  --step-bars 100 \
+  --out artifacts/eval/walk_forward_report.json
+```
+
+
+## Next baseline upgrade: gradient boosting
+
+```bash
+python -m src.train.train_gbdt_baseline \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --decision-cost 0.02 \
+  --min-edge 0.03 \
+  --out-dir artifacts/gbdt_baseline
+```
+
+Outputs:
+- `artifacts/gbdt_baseline/gbdt_direction_model.joblib`
+- `artifacts/gbdt_baseline/metrics.json`
+
+
+## Next model upgrade: sequence GRU baseline
+
+```bash
+python -m src.train.train_sequence_model \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --lookback 48 \
+  --epochs 10 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --out-dir artifacts/sequence_gru
+```
+
+Outputs:
+- `artifacts/sequence_gru/gru_sequence_model.pt`
+- `artifacts/sequence_gru/metrics.json`
+
+
+## Compare models in one report (ablation helper)
+
+```bash
+python -m src.eval.compare_models \
+  --model logistic=artifacts/baseline/metrics.json \
+  --model gbdt=artifacts/gbdt_baseline/metrics.json \
+  --model gru=artifacts/sequence_gru/metrics.json \
+  --model cnn=artifacts/image_cnn/metrics.json \
+  --out artifacts/eval/model_comparison.json \
+  --out-csv artifacts/eval/model_comparison.csv
+```
+
+This produces a single comparison table and reports missing model files without crashing.
+
+
+## One-command ablation pipeline (judgment-call helper)
+
+If you want one command to train key models and auto-compare them:
+
+```bash
+python -m src.eval.run_ablation_pipeline \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --images-dir data/processed/images_224 \
+  --windows data/interim/windows/window_index.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out-root artifacts/ablation
+```
+
+It trains logistic, GBDT, and GRU.
+If images/windows exist, it also runs CNN.
+Then it creates:
+- `artifacts/ablation/model_comparison.json`
+- `artifacts/ablation/model_comparison.csv`
+
+
+## Business-style readiness report (green/yellow/red)
+
+After `model_comparison.json` is generated:
+
+```bash
+python -m src.eval.readiness_report \
+  --comparison artifacts/ablation/model_comparison.json \
+  --min-test-auc 0.55 \
+  --min-test-balanced-accuracy 0.53 \
+  --min-proxy-ev 0.0 \
+  --out artifacts/ablation/readiness_report.json
+```
+
+This gives a simple traffic-light status for non-technical review.
+
+
+## Backtest decision policy from trained baseline model
+
+```bash
+python -m src.eval.backtest_from_model \
+  --model artifacts/baseline/baseline_direction_model.joblib \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --val-end 2025-03-31T23:55:00Z \
+  --min-edge 0.03 \
+  --decision-cost 0.02 \
+  --slippage 0.00 \
+  --out artifacts/eval/backtest_baseline.json
+```
+
+This outputs coverage, hit rate, average PnL/trade, total PnL, and max drawdown.
+
+
+## Freeze dataset manifest (`dataset_v1`)
+
+```bash
+python src/data/freeze_dataset_manifest.py \
+  --name dataset_v1 \
+  --source "coinbase BTC/USD" \
+  --timeframe 5m \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --windows data/interim/windows/window_index.parquet \
+  --images-dir data/processed/images_224 \
+  --out artifacts/manifests/dataset_v1_manifest.json
+```
+
+This records file hashes, row counts, split boundaries, and image counts for reproducibility.
+
+
+## Connectivity preflight
+
+```bash
+python src/data/check_connectivity.py --url https://api.coinbase.com/v2/currencies
+```
+
+If unreachable, run synthetic/offline mode and defer real-data fetch to Colab/networked runtime.
+
+
+## Final go/no-go decision gate
+
+After readiness + backtest are generated:
+
+```bash
+python -m src.eval.go_no_go_gate \
+  --readiness artifacts/ablation/readiness_report.json \
+  --backtest artifacts/eval/backtest_baseline.json \
+  --manifest artifacts/manifests/dataset_v1_manifest.json \
+  --min-trades 50 \
+  --min-hit-rate 0.52 \
+  --max-dd -0.25 \
+  --out artifacts/eval/go_no_go_report.json
+```
+
+Decision output options:
+- `go_paper`
+- `iterate`
+- `no_go`
+
+
+> `run_ablation_pipeline.py` now also auto-runs readiness/backtest/go-no-go outputs into the same `--out-root` folder.
+
+
+## Single-model mode (lean workflow)
+
+If you do **not** want full benchmarking each run:
+
+```bash
+python -m src.eval.run_single_model_pipeline \
+  --ohlcv data/raw/ohlcv/coinbase_btcusd_5m.parquet \
+  --train-end 2024-06-30T23:55:00Z \
+  --val-end 2025-03-31T23:55:00Z \
+  --out-root artifacts/single_model
+```
+
+This runs only one model path (baseline) + backtest + go/no-go.
