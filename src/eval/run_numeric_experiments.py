@@ -27,6 +27,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep-start", type=float, default=0.0)
     p.add_argument("--sweep-end", type=float, default=0.08)
     p.add_argument("--sweep-step", type=float, default=0.01)
+    p.add_argument("--gru-epochs", type=int, default=5)
+    p.add_argument("--gru-batch-size", type=int, default=64)
+    p.add_argument("--gru-lr", type=float, default=1e-3)
     p.add_argument("--out-dir", required=True)
     return p.parse_args()
 
@@ -206,6 +209,12 @@ def main() -> None:
                         str(lookback),
                         "--hidden-dim",
                         str(hidden_dim),
+                        "--epochs",
+                        str(args.gru_epochs),
+                        "--batch-size",
+                        str(args.gru_batch_size),
+                        "--lr",
+                        str(args.gru_lr),
                         "--out-dir",
                         str(runs_dir / run_name),
                     ],
